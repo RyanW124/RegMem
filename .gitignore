@@ -218,3 +218,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Model weights and caches
+hf-cache/
+models/
+
+# Datasets
+datasets/
+data/
+
+# Experiment outputs and checkpoints
+runs/
+checkpoints/
+*.pt
+*.pth
+*.safetensors
