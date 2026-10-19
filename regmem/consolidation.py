@@ -1,0 +1,1 @@
+"""Propose → verify → repair → accept/repeat"""

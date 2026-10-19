@@ -1,0 +1,1 @@
+"""Initial consolidation proposal: LLM proposes WRITE / REVISE / PRUNE / NOOP"""
