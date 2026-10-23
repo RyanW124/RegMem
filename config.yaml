@@ -1,0 +1,8 @@
+model:
+  name: Qwen/Qwen3-0.6B
+  device: cuda
+  dtype: bfloat16
+
+experiment:
+  seed: 42
+  output_dir: results/
