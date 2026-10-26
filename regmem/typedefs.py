@@ -1,7 +1,7 @@
 """Memory, cumulative regression tests, and transaction results."""
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, TypeVar
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 Action = Literal['WRITE', 'REVISE', 'PRUNE']
 T = TypeVar('T', bound=BaseModel)
@@ -9,6 +9,8 @@ T = TypeVar('T', bound=BaseModel)
 class LanguageModel(Protocol):
     def generate(self, system_prompt: str, user_prompt: str) -> str: ...
     def generate_structured(self, system_prompt: str, user_prompt: str, schema: type[T]) -> T: ...
+    def generate_batch(self, system_prompt: str, user_prompts: list[str]) -> list[str]: ...
+    def generate_structured_batch(self, system_prompt: str, user_prompts: list[str], schema: type[T]) -> list[T]: ...
 
 @dataclass
 class MemoryItem:
@@ -25,15 +27,17 @@ class MemoryState:
     def __len__(self):
         return len(self.items)
 
+# Output schemas keep every field required (null where allowed): under constrained decoding an
+# optional field lets the model emit `{}` or skip content entirely.
 class MemoryOperation(BaseModel):
     model_config = ConfigDict(extra='forbid')
     action: Action
-    target_id: str | None = None
-    content: str | None = None
+    target_id: str | None
+    content: str | None
 
 
 class ConsolidationOutput(BaseModel):
-    operations: list[MemoryOperation] = Field(default_factory=list)
+    operations: list[MemoryOperation]
 
 @dataclass
 class DecisionCase:
@@ -50,16 +54,17 @@ class RegressionSuite:
 class RegressionSuiteOperation(BaseModel):
     model_config = ConfigDict(extra='forbid')
     action: Action
-    target_id: str | None = None
-    query: str | None = None
-    expected_answer: str | None = None
+    target_id: str | None
+    query: str | None
+    expected_answer: str | None
 
 class RegressionSuiteOutput(BaseModel):
-    operations: list[RegressionSuiteOperation] = Field(default_factory=list)
+    operations: list[RegressionSuiteOperation]
 
 class JudgeResult(BaseModel):
-    passed: bool
+    # Fields generate in order under constrained decoding: rationale first, then the verdict.
     reason: str
+    passed: bool
 
 @dataclass
 class TestResult:

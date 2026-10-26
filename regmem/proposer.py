@@ -18,10 +18,15 @@ class Consolidator:
     def propose(self, memory: MemoryState, evidence: str) -> list[MemoryOperation]:
         return self._propose(memory, {'new_evidence': evidence})
 
-    def repair(self, memory: MemoryState, evidence: str, failures: list[dict]) -> list[MemoryOperation]:
+    def repair(self, memory: MemoryState, evidence: str, failures: list[dict],
+               previous_items: list[dict] | None = None) -> list[MemoryOperation]:
         """Return a patch against the failed candidate, not the original memory."""
         return self._propose(memory, {'new_evidence': evidence, 'failed_tests': failures,
-            'task': 'Repair this candidate to satisfy failed tests while preserving other knowledge.'})
+            'previous_versions_of_changed_items': previous_items or [],
+            'task': 'Repair this candidate so the failed tests (shown with the answer memory gave) '
+                    'would be answered correctly, while preserving other knowledge. Restore lost '
+                    'information from previous_versions_of_changed_items (items as they were before '
+                    'this consolidation) or new_evidence.'})
 
     def _propose(self, memory, context):
         result = self.llm.generate_structured(system_prompt=SYSTEM_PROMPT,

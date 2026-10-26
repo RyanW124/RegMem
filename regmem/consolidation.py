@@ -85,11 +85,18 @@ class ConsolidationEngine:
                 return ConsolidationResult(True, candidate, expanded, verification, attempt + 1, operations)
             if attempt < self.max_repairs:
                 by_id = {t.id: t for t in expanded.tests}
-                failures = [{**asdict(r), 'query': by_id[r.test_id].query}
+                # Repair sees what memory answered, never the reference answer or the judge's
+                # reason (written with the reference in view), so it cannot copy gold to pass.
+                failures = [{'test_id': r.test_id, 'query': by_id[r.test_id].query,
+                             'predicted_answer': r.predicted_answer}
                             for r in verification.results if not r.passed]
-                patch = self.consolidator.repair(candidate, evidence, failures)
-                record('repair_patch', after_attempt=attempt + 1,
-                       failures=failures, operations=[op.model_dump() for op in patch])
+                # The last accepted memory passed the suite, so regressions usually trace to
+                # items this cycle revised or pruned: hand repair their pre-cycle versions.
+                current = {x.id: x.content for x in candidate.items}
+                previous_items = [asdict(x) for x in memory.items if current.get(x.id) != x.content]
+                patch = self.consolidator.repair(candidate, evidence, failures, previous_items)
+                record('repair_patch', after_attempt=attempt + 1, failures=failures,
+                       previous_items=previous_items, operations=[op.model_dump() for op in patch])
                 candidate = apply_memory_operations(candidate, patch)
                 record('candidate', attempt=attempt + 2, memory=asdict(candidate))
                 operations.extend(patch)
