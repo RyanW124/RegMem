@@ -1,7 +1,7 @@
 """Memory, cumulative regression tests, and transaction results."""
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, TypeVar
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 Action = Literal['WRITE', 'REVISE', 'PRUNE']
 T = TypeVar('T', bound=BaseModel)
@@ -28,12 +28,13 @@ class MemoryState:
         return len(self.items)
 
 # Output schemas keep every field required (null where allowed): under constrained decoding an
-# optional field lets the model emit `{}` or skip content entirely.
+# optional field lets the model emit `{}` or skip content entirely. Length caps keep outputs
+# inside max_new_tokens and memory items atomic.
 class MemoryOperation(BaseModel):
     model_config = ConfigDict(extra='forbid')
     action: Action
     target_id: str | None
-    content: str | None
+    content: str | None = Field(max_length=300)
 
 
 class ConsolidationOutput(BaseModel):
@@ -55,15 +56,15 @@ class RegressionSuiteOperation(BaseModel):
     model_config = ConfigDict(extra='forbid')
     action: Action
     target_id: str | None
-    query: str | None
-    expected_answer: str | None
+    query: str | None = Field(max_length=200)
+    expected_answer: str | None = Field(max_length=150)
 
 class RegressionSuiteOutput(BaseModel):
     operations: list[RegressionSuiteOperation]
 
 class JudgeResult(BaseModel):
     # Fields generate in order under constrained decoding: rationale first, then the verdict.
-    reason: str
+    reason: str = Field(max_length=300)
     passed: bool
 
 @dataclass
