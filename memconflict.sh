@@ -13,6 +13,8 @@ source ~/scratch/848n/venv/bin/activate
 # The python module prepends its own site-packages to PYTHONPATH, shadowing the venv's packages.
 unset PYTHONPATH
 export HF_HOME=~/scratch/848n/hf_cache HF_HUB_OFFLINE=1
+# Long batched prompts fragment GPU memory; expandable segments avoid spurious out-of-memory errors.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd ~/scratch/848n
 nvidia-smi -L
 python run_memconflict.py "$@"
