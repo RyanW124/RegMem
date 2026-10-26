@@ -6,6 +6,9 @@ from .typedefs import ConsolidationOutput, LanguageModel, MemoryItem, MemoryOper
 
 SYSTEM_PROMPT = '''Maintain concise memory using the supplied evidence.
 Preserve facts, exceptions, constraints, preferences, and unresolved disagreements.
+Each item is one short, self-contained fact about the user in plain English, e.g.
+"User was born in Pittsburgh, Pennsylvania." Never store JSON, transcripts, or long
+summaries, and skip small talk. Use at most 10 operations per call.
 Do not invent facts. Prefer revising duplicates. WRITE creates an item with null
 target_id; REVISE replaces an existing item's content; PRUNE deletes an existing
 item and must have null content. Return an empty operations list for no change.
