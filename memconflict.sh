@@ -4,6 +4,8 @@
 #SBATCH --partition=gpu
 #SBATCH --gpus=a100:1
 #SBATCH -t 03:00:00
+# Default is 4 GB host RAM; loading the 8B model needs more.
+#SBATCH --mem=32G
 #SBATCH -o %x-%j.out
 # From ~/scratch/848n (one process per instance; startup costs minutes):
 #   sbatch memconflict.sh --instance 0 --out results/pilot --arm probes extract summarize regmem --on-reject append retire

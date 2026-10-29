@@ -60,6 +60,17 @@ class ConsolidationEngine:
             stream.write('\n')
         return str(path.resolve())
 
+    @staticmethod
+    def _attempt(propose, record, attempt):
+        # A malformed proposal (invalid JSON or an op on an unknown id) is an empty patch, so
+        # verification fails and the bounded repair loop retries instead of aborting the cycle.
+        # pydantic's ValidationError subclasses ValueError.
+        try:
+            return list(propose())
+        except ValueError as error:
+            record('invalid_proposal', attempt=attempt, error=f'{type(error).__name__}: {error}')
+            return []
+
     def _consolidate(self, memory, suite, evidence, trace):
         def record(event, **details):
             if trace is not None:
@@ -70,7 +81,7 @@ class ConsolidationEngine:
         record('regression_proposal', operations=[op.model_dump() for op in test_operations])
         expanded = apply_regression_operations(suite, test_operations)
         record('expanded_suite', suite=asdict(expanded))
-        operations = list(self.consolidator.propose(memory, evidence))
+        operations = self._attempt(lambda: self.consolidator.propose(memory, evidence), record, attempt=1)
         record('memory_proposal', operations=[op.model_dump() for op in operations])
         candidate = apply_memory_operations(memory, operations)
         record('candidate', attempt=1, memory=asdict(candidate))
@@ -94,7 +105,8 @@ class ConsolidationEngine:
                 # items this cycle revised or pruned: hand repair their pre-cycle versions.
                 current = {x.id: x.content for x in candidate.items}
                 previous_items = [asdict(x) for x in memory.items if current.get(x.id) != x.content]
-                patch = self.consolidator.repair(candidate, evidence, failures, previous_items)
+                patch = self._attempt(lambda: self.consolidator.repair(candidate, evidence, failures, previous_items),
+                                      record, attempt=attempt + 2)
                 record('repair_patch', after_attempt=attempt + 1, failures=failures,
                        previous_items=previous_items, operations=[op.model_dump() for op in patch])
                 candidate = apply_memory_operations(candidate, patch)

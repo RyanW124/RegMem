@@ -31,14 +31,17 @@ class MemoryState:
 # optional field lets the model emit `{}` or skip content entirely. Length caps keep outputs
 # inside max_new_tokens and memory items atomic.
 class MemoryOperation(BaseModel):
+    # Content generates first so the model states the fact before choosing an action and target;
+    # action-first made the 8B model REVISE ids 0, 1, 2... in order regardless of content.
     model_config = ConfigDict(extra='forbid')
+    content: str | None = Field(max_length=300)
     action: Action
     target_id: str | None
-    content: str | None = Field(max_length=300)
 
 
 class ConsolidationOutput(BaseModel):
-    operations: list[MemoryOperation]
+    # The 8B model ignores a prompt-only limit and lists ops until max_new_tokens truncates the JSON.
+    operations: list[MemoryOperation] = Field(max_length=10)
 
 @dataclass
 class DecisionCase:
