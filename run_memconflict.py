@@ -1,6 +1,6 @@
 """MemConflict midterm benchmark: run one arm on one instance.
 
-  probes     generate the shared probe suite once (first k per session) -> {out}/probes/inst{i}.json
+  probes     generate the shared probe suite once (first k per session that the session's own extraction passes) -> {out}/probes/inst{i}.json
   extract    arm (a), no consolidation: each session extracted alone (empty memory, so WRITE-only), appended
   summarize  arm (b), consolidation only: Consolidator output applied every session, never verified
   regmem     arm (c): ConsolidationEngine gate; --on-reject append|retire decides a failed cycle
@@ -206,9 +206,18 @@ def memory_tokens(llm, memory):
 
 def make_probes(args, llm, instance, sessions, path):
     generator, suite, per_session, errors = RegressionGenerator(llm), RegressionSuite(), [], []
+    consolidator, verifier = Consolidator(llm), Verifier(llm)
     for c, session in enumerate(sessions):
         try:
-            ops = generator.propose(suite, session_evidence(session))[:args.probes_per_session]
+            evidence = session_evidence(session)
+            ops = generator.propose(suite, evidence)
+            if ops:
+                # Keep only probes this session's own extracted facts answer: a regression is a test that
+                # once passed, and a probe no memory passes would block every RegMem cycle.
+                facts = extract(consolidator, MemoryState(), evidence)
+                failed = set(verifier.verify(facts, apply_regression_operations(RegressionSuite(), ops)).failed_test_ids)
+                ops = [op for n, op in enumerate(ops) if str(n) not in failed]
+            ops = ops[:args.probes_per_session]
         except Exception as error:  # a malformed generation costs this session's probes, not the run
             ops = []
             errors.append({'cycle': c, 'error': f'{type(error).__name__}: {error}'})
