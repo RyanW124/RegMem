@@ -23,8 +23,13 @@ class RegressionGenerator:
         result = self.llm.generate_structured(system_prompt=SYSTEM_PROMPT,
             user_prompt=json.dumps({'existing_tests': [asdict(t) for t in suite.tests],
                                     'new_evidence': evidence}), schema=RegressionSuiteOutput)
-        apply_regression_operations(suite, result.operations)
+        # A proposal the cumulative suite rejects is raised here rather than applied in part.
+        validate_regression_operations(suite, result.operations)
         return result.operations
+
+def validate_regression_operations(suite: RegressionSuite, operations: list[RegressionSuiteOperation]) -> None:
+    """Raise ValueError if the operations cannot be applied to the suite. The suite is never modified."""
+    apply_regression_operations(suite, operations)
 
 def apply_regression_operations(suite: RegressionSuite, operations: list[RegressionSuiteOperation]) -> RegressionSuite:
     candidate = deepcopy(suite)

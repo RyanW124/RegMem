@@ -9,6 +9,8 @@ from outlines import Generator
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from .typedefs import BatchLengthError
+
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -120,6 +122,9 @@ class LLM:
                 max_new_tokens=self.max_new_tokens,
                 temperature=self.temperature,
             ))
+        # Callers align outputs with their prompts by position, so a short batch must not pass.
+        if len(outputs) != len(prompts):
+            raise BatchLengthError(f'generate_batch returned {len(outputs)} outputs for {len(prompts)} prompts')
         return [output.strip() for output in outputs]
 
     @torch.inference_mode()
@@ -139,4 +144,7 @@ class LLM:
                 max_new_tokens=self.max_new_tokens,
                 temperature=self.temperature,
             ))
+        if len(responses) != len(prompts):
+            raise BatchLengthError(f'generate_structured_batch returned {len(responses)} outputs '
+                                   f'for {len(prompts)} prompts')
         return [schema.model_validate_json(r) for r in responses]

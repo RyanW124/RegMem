@@ -61,15 +61,29 @@ class ConsolidationEngine:
         return str(path.resolve())
 
     @staticmethod
-    def _attempt(propose, record, attempt):
+    def _record_error(record, kind, attempt, error):
+        record(kind, attempt=attempt, error=f'{type(error).__name__}: {error}')
+
+    def _attempt(self, record, attempt, propose):
         # A malformed proposal (invalid JSON or an op on an unknown id) is an empty patch, so
         # verification fails and the bounded repair loop retries instead of aborting the cycle.
         # pydantic's ValidationError subclasses ValueError.
         try:
             return list(propose())
         except ValueError as error:
-            record('invalid_proposal', attempt=attempt, error=f'{type(error).__name__}: {error}')
+            self._record_error(record, 'invalid_proposal', attempt, error)
             return []
+
+    def _propose_tests(self, record, suite, evidence):
+        # Probes face the same policy as memory patches: a proposal the cumulative suite rejects
+        # costs this cycle its new probes instead of aborting the cycle. Validation happens here,
+        # because a custom generator (e.g. a replay of cached probes) need not validate its output.
+        try:
+            operations = list(self.regression_generator.propose(suite, evidence))
+            return operations, apply_regression_operations(suite, operations)
+        except ValueError as error:
+            self._record_error(record, 'invalid_regression_proposal', 0, error)
+            return [], deepcopy(suite)
 
     def _consolidate(self, memory, suite, evidence, trace):
         def record(event, **details):
@@ -77,11 +91,10 @@ class ConsolidationEngine:
                 trace['events'].append({'event': event, **details})
 
         # Freeze the expanded suite before any repair, so repairs cannot weaken it.
-        test_operations = self.regression_generator.propose(suite, evidence)
+        test_operations, expanded = self._propose_tests(record, suite, evidence)
         record('regression_proposal', operations=[op.model_dump() for op in test_operations])
-        expanded = apply_regression_operations(suite, test_operations)
         record('expanded_suite', suite=asdict(expanded))
-        operations = self._attempt(lambda: self.consolidator.propose(memory, evidence), record, attempt=1)
+        operations = self._attempt(record, 1, lambda: self.consolidator.propose(memory, evidence))
         record('memory_proposal', operations=[op.model_dump() for op in operations])
         candidate = apply_memory_operations(memory, operations)
         record('candidate', attempt=1, memory=asdict(candidate))
@@ -105,8 +118,8 @@ class ConsolidationEngine:
                 # items this cycle revised or pruned: hand repair their pre-cycle versions.
                 current = {x.id: x.content for x in candidate.items}
                 previous_items = [asdict(x) for x in memory.items if current.get(x.id) != x.content]
-                patch = self._attempt(lambda: self.consolidator.repair(candidate, evidence, failures, previous_items),
-                                      record, attempt=attempt + 2)
+                patch = self._attempt(record, attempt + 2,
+                                      lambda: self.consolidator.repair(candidate, evidence, failures, previous_items))
                 record('repair_patch', after_attempt=attempt + 1, failures=failures,
                        previous_items=previous_items, operations=[op.model_dump() for op in patch])
                 candidate = apply_memory_operations(candidate, patch)

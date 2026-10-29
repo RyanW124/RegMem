@@ -6,6 +6,13 @@ from pydantic import BaseModel, ConfigDict, Field
 Action = Literal['WRITE', 'REVISE', 'PRUNE']
 T = TypeVar('T', bound=BaseModel)
 
+class BatchLengthError(ValueError):
+    """A batched model call returned a different number of outputs than it was given prompts.
+
+    Raised instead of zipping the short list against the prompts, which would silently drop
+    probes from a verification and let a candidate pass tests it never took.
+    """
+
 class LanguageModel(Protocol):
     def generate(self, system_prompt: str, user_prompt: str) -> str: ...
     def generate_structured(self, system_prompt: str, user_prompt: str, schema: type[T]) -> T: ...
@@ -89,6 +96,17 @@ class VerificationResult:
     @property
     def failed_test_ids(self):
         return [result.test_id for result in self.results if not result.passed]
+
+    @property
+    def pass_rate(self) -> float:
+        """Share of probes that passed; 1.0 for an empty suite, which passes vacuously."""
+        return sum(result.passed for result in self.results) / len(self.results) if self.results else 1.0
+
+    def summary(self) -> str:
+        """One-line report for logs, e.g. 'probes 5/7 passed (failed: 2, 6)'."""
+        failed = self.failed_test_ids
+        count = f'{len(self.results) - len(failed)}/{len(self.results)}'
+        return f'probes {count} passed' + (f' (failed: {", ".join(failed)})' if failed else '')
 
 @dataclass
 class ConsolidationResult:
