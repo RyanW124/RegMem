@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "regmem"
+version = "0.1.0"
+description = "Regression-guided memory consolidation that preserves decision-relevant information"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Ryan Wong" }]
+keywords = ["memory", "llm", "consolidation", "regression-tests", "agents"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["pydantic>=2"]
+
+[project.optional-dependencies]
+# The core engine needs only pydantic; these are for running a real model and for the benchmark figures.
+models = ["accelerate", "outlines[transformers]==1.3.3", "torch", "transformers"]
+analysis = ["matplotlib"]
+dev = ["pytest>=8", "ruff"]
+
+[project.scripts]
+regmem = "regmem.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/RyanW124/RegMem"
+
+[tool.setuptools]
+packages = ["regmem"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# The tree keeps the author's formatting (wide single-line dicts, lambda assignments in the runners),
+# so only real errors and unused names are enforced.
+select = ["E9", "F"]
