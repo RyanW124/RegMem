@@ -66,8 +66,7 @@ def apply_memory_operations(state: MemoryState, operations: list[MemoryOperation
                     continue  # no-op revision; skip rather than count it as a change
                 items[op.target_id].content = op.content
             else:
-                if op.content is not None:
-                    raise ValueError('PRUNE requires null content')
+                # Content generates before the action, so a PRUNE may carry text; it is ignored.
                 del items[op.target_id]
         else:
             raise ValueError('Unknown memory action')

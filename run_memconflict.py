@@ -133,11 +133,12 @@ def extract(consolidator, memory, evidence):
 
 
 def append_fallback(consolidator, verifier, memory, gate, evidence, ops):
-    """Reject policy 'append': keep the old memory, append this session as arm (a) would, and gate on
-    this cycle's probes only where the appended memory passes them."""
+    """Reject policy 'append': keep the old memory, append this session as arm (a) would, and gate only on
+    probes the appended memory passes. It keeps every old item, so an old probe it fails is stale (a later
+    session legitimately changed that fact) and is retired rather than blocking every later cycle."""
     memory = extract(consolidator, memory, evidence)
     expanded = apply_regression_operations(gate, ops)
-    failed = set(verifier.verify(memory, RegressionSuite(expanded.tests[len(gate.tests):])).failed_test_ids)
+    failed = set(verifier.verify(memory, expanded).failed_test_ids)
     return memory, without(expanded, failed), sorted(failed)
 
 
