@@ -59,3 +59,80 @@ state. Timestamps are UTC. Relative output paths resolve from the working direct
 Errored runs save the completed events plus exception type/message before reraising;
 operations or partial verifier results that never returned cannot be recorded.
 File-writing errors propagate. Logs contain the supplied memory and evidence.
+
+## Install
+
+```bash
+pip install .                 # core: Pydantic 2 only
+pip install '.[models]'       # + Transformers, Outlines, torch for a real model
+pip install '.[dev]'          # + pytest and ruff
+```
+
+This also installs the `regmem` command. `run_memconflict.py` and
+`analyze_memconflict.py` stay plain scripts, so the benchmark keeps working from a
+checkout with `requirements.txt`.
+
+## Command line
+
+```bash
+regmem consolidate --memory memory.json --suite suite.json --evidence note.txt --save-run
+regmem consolidate --memory memory.json --suite suite.json --text 'I prefer tea.' --write --json
+regmem verify --memory memory.json --suite suite.json
+regmem inspect results/runs/run-*.json
+```
+
+`consolidate` runs one cycle and reports the outcome, the memory and suite size
+change, and the probe result. It leaves the files alone unless `--write` is given,
+which saves the accepted memory and suite back (a rejected cycle writes nothing).
+`verify` re-runs the suite against a saved memory without proposing anything.
+`inspect` summarizes saved traces: status, attempts, probe counts, and the ids that
+failed, or the recorded error for an errored run. Exit codes are `0` for accepted
+(all probes passed), `1` for rejected (a probe failed), and `2` for a usage, file or
+model error, so a script can gate on the outcome without parsing output.
+
+## Saving and loading memory
+
+Memory and suites are plain dataclasses, so `regmem.persistence` writes them as JSON
+and reads them back:
+
+```python
+from regmem import load_memory, load_suite, save_memory, save_suite
+
+memory, suite = load_memory('memory.json'), load_suite('suite.json')
+result = engine.consolidate(memory, suite, evidence)
+if result.accepted:
+    save_memory('memory.json', result.memory)
+    save_suite('suite.json', result.suite)
+```
+
+Writes go through a temporary file and `os.replace` in the destination directory, so
+an interrupted or concurrent write cannot leave a half-written memory behind, and
+concurrent traces never overwrite each other. Loading validates the whole payload:
+field types, non-blank text, unique ids, and `next_id` above every integer id (new
+items are numbered from it, so a smaller value would collide on the next WRITE).
+A malformed file raises `ValueError` naming the field.
+
+## Dry runs without a model
+
+`regmem.stub.StubLLM` answers, proposes and judges as a pure function of the prompt,
+so a full cycle can run on a laptop with no GPU, no weights and no network:
+
+```bash
+regmem consolidate --memory memory.json --suite suite.json --text 'I prefer tea.' --model stub
+python run_memconflict.py --arm probes extract summarize regmem --instance 0 --model stub
+```
+
+It exercises the plumbing (proposal validation, the repair loop, traces, batching),
+not the quality of the memory it builds. It also emits an invalid operation now and
+then so the invalid-proposal path stays covered.
+
+## What a pass means
+
+The judge is asked for one verdict per probe, and verification requires exactly one
+answer and one verdict per test in the suite. A batched call that returns a different
+number of outputs (a lost batch, a truncated response) raises `BatchLengthError`
+instead of scoring the remaining probes: an unchecked candidate is never accepted.
+The same policy applies to proposals: a probe proposal the cumulative suite rejects,
+like a memory proposal the memory rejects, costs that cycle its proposal and is
+recorded in the trace, rather than aborting the cycle.
+

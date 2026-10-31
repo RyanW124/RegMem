@@ -11,7 +11,6 @@ suite and re-asks the static queries issued so far. Probes come first (same --ou
 one process, e.g. --arm probes extract summarize regmem --on-reject append retire.
 """
 import argparse
-import hashlib
 import json
 import random
 import time
@@ -24,8 +23,8 @@ from pydantic import BaseModel, Field
 from regmem import ConsolidationEngine, Consolidator, RegressionGenerator, Verifier
 from regmem.proposer import apply_memory_operations
 from regmem.regression import apply_regression_operations
-from regmem.typedefs import (ConsolidationOutput, JudgeResult, MemoryOperation, MemoryState, RegressionSuite,
-                             RegressionSuiteOperation, RegressionSuiteOutput)
+from regmem.stub import StubLLM
+from regmem.typedefs import MemoryState, RegressionSuite, RegressionSuiteOperation
 
 # Answer and judge prompts from MemConflict (github.com/TaoZhen1110/MemConflict: Evaluation/eval_memzero.py,
 # Evaluation/eval_scoring.py), with the white-box retrieval inputs and metrics removed.
@@ -150,45 +149,6 @@ def retire_fallback(memory, gate, ops, result):
             without(apply_regression_operations(gate, ops), failed), sorted(failed))
 
 
-class StubLLM:
-    """Deterministic fake LLM for a local dry run of the whole pipeline (no GPU, no model)."""
-    @staticmethod
-    def _roll(text):
-        return int(hashlib.md5(text.encode()).hexdigest(), 16) % 100
-
-    def generate(self, system_prompt, user_prompt):
-        return self.generate_batch(system_prompt, [user_prompt])[0]
-
-    def generate_structured(self, system_prompt, user_prompt, schema):
-        return self.generate_structured_batch(system_prompt, [user_prompt], schema)[0]
-
-    def generate_batch(self, system_prompt, user_prompts):
-        return [f'stub answer {self._roll(p)}' for p in user_prompts]
-
-    def generate_structured_batch(self, system_prompt, user_prompts, schema):
-        return [self._fake(p, schema) for p in user_prompts]
-
-    def _fake(self, prompt, schema):
-        roll = self._roll(prompt)
-        if schema is RegressionSuiteOutput:
-            return schema(operations=[RegressionSuiteOperation(action='WRITE', target_id=None, query=f'stub probe {roll}.{n}?',
-                                                               expected_answer=f'stub {roll}.{n}') for n in range(4)])
-        if schema is ConsolidationOutput:
-            payload = json.loads(prompt)
-            if any({'expected_answer', 'reason'} & set(f) for f in payload.get('failed_tests', [])):
-                raise SystemExit('gold answer leaked into the repair payload')  # not caught by the runner
-            ops = [MemoryOperation(action='WRITE', target_id=None, content=f'stub fact {roll}')]
-            if payload['memory'] and roll < 30:
-                ops.append(MemoryOperation(action='PRUNE', target_id=payload['memory'][0]['id'], content=None))
-            if roll >= 97:  # an invalid op now and then, to exercise error handling
-                ops.append(MemoryOperation(action='REVISE', target_id='no-such-id', content='x'))
-            return schema(operations=ops)
-        if schema is JudgeResult:
-            return schema(passed=roll < 85, reason='stub verdict')
-        return schema(**{name: 'stub' if name == 'reasoning' else (1.0 if roll < 50 else 0.0) if 'accuracy' in name
-                         else int(roll < 50) for name in schema.model_fields})
-
-
 def load_llm(args):
     random.seed(args.seed)
     if args.model == 'stub':
@@ -284,7 +244,7 @@ def run_arm(args, arm, policy, llm, instance, sessions, probes, out):
                 if checkpoint and shared.tests:
                     verification = verifier.verify(memory, shared)
                     row['probes'] = [asdict(r) for r in verification.results]
-                    row['probe_pass_rate'] = sum(r.passed for r in verification.results) / len(verification.results)
+                    row['probe_pass_rate'] = verification.pass_rate
                 if checkpoint:
                     row['static_reask'] = ask(llm, memory, issued_static)
             except Exception as error:

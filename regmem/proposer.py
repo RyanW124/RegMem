@@ -39,8 +39,14 @@ class Consolidator:
         result = self.llm.generate_structured(system_prompt=SYSTEM_PROMPT,
             user_prompt=json.dumps({'memory': [asdict(x) for x in memory.items], **context}),
             schema=ConsolidationOutput)
-        apply_memory_operations(memory, result.operations)
+        # A proposal the memory cannot apply is rejected here, so the engine's bounded repair loop
+        # sees an empty patch instead of a partially applied one.
+        validate_memory_operations(memory, result.operations)
         return result.operations
+
+def validate_memory_operations(state: MemoryState, operations: list[MemoryOperation]) -> None:
+    """Raise ValueError if the operations cannot be applied to state. State is never modified."""
+    apply_memory_operations(state, operations)
 
 def apply_memory_operations(state: MemoryState, operations: list[MemoryOperation]) -> MemoryState:
     candidate = deepcopy(state)
