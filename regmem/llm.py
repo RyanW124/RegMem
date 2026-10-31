@@ -113,13 +113,11 @@ class LLM:
     ) -> list[str]:
         prompts = [self._format_prompt(system_prompt, p) for p in user_prompts]
 
-        outputs = []
-        for start in range(0, len(prompts), self.batch_size):
-            outputs.extend(self.outlines_model.batch(
-                prompts[start:start + self.batch_size],
-                max_new_tokens=self.max_new_tokens,
-                temperature=self.temperature,
-            ))
+        outputs = self._run_batched(lambda chunk: self.outlines_model.batch(
+            chunk,
+            max_new_tokens=self.max_new_tokens,
+            temperature=self.temperature,
+        ), prompts)
         return [output.strip() for output in outputs]
 
     @torch.inference_mode()
@@ -132,11 +130,26 @@ class LLM:
         prompts = [self._format_prompt(system_prompt, p) for p in user_prompts]
         generator = self._generator(schema)
 
-        responses = []
-        for start in range(0, len(prompts), self.batch_size):
-            responses.extend(generator.batch(
-                prompts[start:start + self.batch_size],
-                max_new_tokens=self.max_new_tokens,
-                temperature=self.temperature,
-            ))
+        responses = self._run_batched(lambda chunk: generator.batch(
+            chunk,
+            max_new_tokens=self.max_new_tokens,
+            temperature=self.temperature,
+        ), prompts)
         return [schema.model_validate_json(r) for r in responses]
+
+    def _run_batched(self, run, prompts: list[str]) -> list[str]:
+        # Late sessions put thousands of memory tokens in every prompt, so a full batch can
+        # exceed GPU memory. On out-of-memory, halve the chunk size and retry the same chunk.
+        outputs, start, size = [], 0, self.batch_size
+        while start < len(prompts):
+            chunk = prompts[start:start + size]
+            try:
+                outputs.extend(run(chunk))
+            except torch.cuda.OutOfMemoryError:
+                if size == 1:
+                    raise
+                torch.cuda.empty_cache()
+                size //= 2
+                continue
+            start += len(chunk)
+        return outputs
