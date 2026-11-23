@@ -1,0 +1,4 @@
+-r requirements.txt
+datasets
+peft>=0.20
+trl==1.18.2

@@ -99,3 +99,4 @@ class ConsolidationResult:
     attempts: int
     operations: list[MemoryOperation] = field(default_factory=list)
     run_path: str | None = None
+    failed_test_ids_by_attempt: list[list[str]] = field(default_factory=list)

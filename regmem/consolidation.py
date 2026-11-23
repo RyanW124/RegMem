@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 from uuid import uuid4
-from .proposer import Consolidator, apply_memory_operations
+from .proposer import Consolidator, apply_memory_operations, repair_context
 from .regression import RegressionGenerator, apply_regression_operations
 from .typedefs import ConsolidationResult, MemoryState, RegressionSuite
 from .verifier import Verifier
@@ -85,27 +85,21 @@ class ConsolidationEngine:
         record('memory_proposal', operations=[op.model_dump() for op in operations])
         candidate = apply_memory_operations(memory, operations)
         record('candidate', attempt=1, memory=asdict(candidate))
+        failed_by_attempt = []
         for attempt in range(self.max_repairs + 1):
             verification = self.verifier.verify(candidate, expanded)
+            failed_by_attempt.append(verification.failed_test_ids)
             record('verification', attempt=attempt + 1, passed=verification.passed,
                    failed_test_ids=verification.failed_test_ids,
                    results=[asdict(r) for r in verification.results])
             if verification.passed:
                 # All internal patches form one externally visible transaction.
                 candidate.version = memory.version + int(bool(operations))
-                return ConsolidationResult(True, candidate, expanded, verification, attempt + 1, operations)
+                return ConsolidationResult(True, candidate, expanded, verification, attempt + 1, operations,
+                                           failed_test_ids_by_attempt=failed_by_attempt)
             if attempt < self.max_repairs:
-                by_id = {t.id: t for t in expanded.tests}
-                # Repair sees what memory answered, never the reference answer or the judge's
-                # reason (written with the reference in view), so it cannot copy gold to pass.
-                failures = [{'test_id': r.test_id, 'query': by_id[r.test_id].query,
-                             'predicted_answer': r.predicted_answer}
-                            for r in verification.results if not r.passed]
-                # The last accepted memory passed the suite, so regressions usually trace to
-                # items this cycle revised or pruned: hand repair their pre-cycle versions.
-                current = {x.id: x.content for x in candidate.items}
-                previous_items = [asdict(x) for x in memory.items if current.get(x.id) != x.content]
-                patch = self._attempt(lambda: self.consolidator.repair(candidate, evidence, failures, previous_items),
+                failures, previous_items = repair_context(memory, candidate, expanded, verification)
+                patch = self._attempt(lambda: self.consolidator.repair(candidate, failures, previous_items),
                                       record, attempt=attempt + 2)
                 record('repair_patch', after_attempt=attempt + 1, failures=failures,
                        previous_items=previous_items, operations=[op.model_dump() for op in patch])
@@ -113,4 +107,4 @@ class ConsolidationEngine:
                 record('candidate', attempt=attempt + 2, memory=asdict(candidate))
                 operations.extend(patch)
         return ConsolidationResult(False, deepcopy(memory), deepcopy(suite), verification,
-                                   self.max_repairs + 1, operations)
+                                   self.max_repairs + 1, operations, failed_test_ids_by_attempt=failed_by_attempt)
