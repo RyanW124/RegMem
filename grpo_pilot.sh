@@ -6,19 +6,17 @@
 #SBATCH --mem=48G
 #SBATCH -t 12:00:00
 #SBATCH -o %x-%j.out
+#SBATCH --export=ALL
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 root=${RUN_DIR:-runs/grpo}
 phase=${1:?Choose submit, prepare, proposal, mine, repair, or transitions}
+# Use the caller's activated environment, inherited by each Slurm job.
+python -c 'import sys; sys.exit("GRPO requires Python 3.11+; activate your environment before submitting.") if sys.version_info < (3, 11) else None'
 if [[ $phase == submit ]]; then
-    exec python3 grpo_submit.py "$root" "$0"
+    exec python grpo_submit.py "$root" "$0"
 fi
 
-module load python
-source "${REGMEM_VENV:-$HOME/scratch/848n/venv}/bin/activate"
-unset PYTHONPATH
-export HF_HOME="${HF_HOME:-$HOME/scratch/848n/hf_cache}" HF_HUB_OFFLINE=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 model=${REGMEM_MODEL:-Qwen/Qwen3-8B}
 data="$root/data"
 case "$phase" in

@@ -67,15 +67,21 @@ the candidate items, pre-update versions of changed or deleted items, and the
 failed questions with the answers the candidate gave. Reference answers stay in
 the verifier. The probe generator and verifier use the frozen base model.
 
-From the RegMem checkout on the Slurm login node, activate the project venv and
-stage the dependencies and data. Set `HF_HOME` to the same scratch cache for
-setup and compute jobs.
+On the Slurm login node, activate your Python 3.11+ environment (venv or Conda)
+and stage the dependencies and data. Environment creation, activation, module
+loading, and cache settings are the user's responsibility. The script checks
+the Python version before submission and uses the active `python` for every
+stage. Slurm inherits the submission environment through `--export=ALL`;
+the environment and cache paths must be accessible from the compute nodes.
 
 ```bash
-export HF_HOME="$HOME/scratch/848n/hf_cache"
+cd ~/scratch/RegMem
+# Activate your Python 3.11+ environment before running these commands.
+export HF_HOME="$PWD/hf_cache"
 python -m pip install -r requirements-grpo.txt
 hf download Qwen/Qwen3-8B
 hf download YuWangX/Memalpha train.parquet --repo-type dataset --revision d59b425407f3f1b0e96797e0b817d45062d3f588 --local-dir data/memalpha
+export HF_HUB_OFFLINE=1
 bash grpo_pilot.sh submit
 ```
 
@@ -84,7 +90,8 @@ failures, train an independent repair LoRA, and evaluate the adapters on held-ou
 uses one A100. `RUN_DIR` defaults to `runs/grpo`. Use a fresh directory for a
 new run. Each adapter directory contains PEFT weights, training metrics, and
 numbered checkpoints. After a timeout, failure, or interrupted submission, run
-`bash grpo_pilot.sh submit` again with the same `RUN_DIR` and settings. The
+`bash grpo_pilot.sh submit` again with the same activated environment, `RUN_DIR`,
+and settings. The
 launcher checks final outputs, reuses active jobs for this run, and submits the
 unfinished stages. Slurm cancels jobs whose success dependency becomes impossible.
 Training continues from the latest complete optimizer checkpoint (every 16 pilot
