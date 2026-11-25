@@ -1,31 +1,38 @@
-"""MemConflict midterm benchmark: run one arm on one instance.
+"""MemConflict benchmark: run arms on one instance at one or more memory token budgets.
 
-  probes     generate the shared probe suite once (first k per session that the session's own extraction passes) -> {out}/probes/inst{i}.json
-  extract    arm (a), no consolidation: each session extracted alone (empty memory, so WRITE-only), appended
-  summarize  arm (b), consolidation only: Consolidator output applied every session, never verified
-  regmem     arm (c): ConsolidationEngine gate; --on-reject append|retire decides a failed cycle
+  probes     generate the shared probe suite once (first k per session that the session's own extraction
+             passes) and cache that extraction -> {out}/probes/inst{i}.json
+  extract    arm (a), append-only: replays each session's cached extraction (empty memory, so WRITE-only)
+  summarize  arm (b), unverified consolidation: Consolidator output applied every session
+  regmem     arm (c): cumulative regression suite gate; a rejected update rolls back
+  trustmem   arm (d): TrustMem-style check of each transition (old memory, session, candidate); a rejected
+             update rolls back
 
-Every arm replays the cached probes and, after each session, logs memory and answers that session's
-MemConflict queries (the benchmark protocol). At checkpoints it measures probe pass rate on the shared
-suite and re-asks the static queries issued so far. Probes come first (same --out); several arms can share
-one process, e.g. --arm probes extract summarize regmem --on-reject append retire.
+Each arm runs once per --budget (0 = no cap). Under a budget the consolidator is told it, a candidate over
+it fails the check (so repair has to compress), and as a last resort any memory still over it drops its
+oldest items, which is append-only's whole policy. After each session every arm logs memory and answers
+that session's MemConflict queries (the benchmark protocol). At checkpoints it measures pass rate on the
+shared probe suite and re-asks the static queries issued so far. Probes come first (same --out); several
+arms can share one process, e.g. --arm probes extract summarize regmem trustmem --budget 1000 2000.
 """
 import argparse
 import hashlib
 import json
 import random
 import time
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from regmem import ConsolidationEngine, Consolidator, RegressionGenerator, Verifier
+from regmem import ConsolidationEngine, Consolidator, RegressionGenerator, SuiteCurator, TransitionChecker, Verifier
 from regmem.proposer import apply_memory_operations
 from regmem.regression import apply_regression_operations
 from regmem.typedefs import (ConsolidationOutput, JudgeResult, MemoryOperation, MemoryState, RegressionSuite,
-                             RegressionSuiteOperation, RegressionSuiteOutput)
+                             RegressionSuiteOperation, RegressionSuiteOutput, SuiteEdit, SuiteEditOutput,
+                             TransitionVerdict)
 
 # Answer and judge prompts from MemConflict (github.com/TaoZhen1110/MemConflict: Evaluation/eval_memzero.py,
 # Evaluation/eval_scoring.py), with the white-box retrieval inputs and metrics removed.
@@ -119,35 +126,12 @@ class CachedProbes:
         self.ops_by_evidence = ops_by_evidence
 
     def propose(self, suite, evidence):
-        return self.ops_by_evidence[evidence]
-
-
-def without(suite, test_ids):
-    suite.tests = [t for t in suite.tests if t.id not in test_ids]
-    return suite
+        return self.ops_by_evidence.get(evidence, [])  # arms without tests get none
 
 
 def extract(consolidator, memory, evidence):
     """Arm (a): extract this session alone (empty memory, so WRITE-only) and append the items."""
     return apply_memory_operations(memory, consolidator.propose(MemoryState(), evidence))
-
-
-def append_fallback(consolidator, verifier, memory, gate, evidence, ops):
-    """Reject policy 'append': keep the old memory, append this session as arm (a) would, and gate only on
-    probes the appended memory passes. It keeps every old item, so an old probe it fails is stale (a later
-    session legitimately changed that fact) and is retired rather than blocking every later cycle."""
-    memory = extract(consolidator, memory, evidence)
-    expanded = apply_regression_operations(gate, ops)
-    failed = set(verifier.verify(memory, expanded).failed_test_ids)
-    return memory, without(expanded, failed), sorted(failed)
-
-
-def retire_fallback(memory, gate, ops, result):
-    """Reject policy 'retire': accept the final repaired candidate (replaying the returned operations on the
-    original memory, as the README documents) and retire the probes it still fails from the gate."""
-    failed = set(result.verification.failed_test_ids)
-    return (apply_memory_operations(memory, result.operations),
-            without(apply_regression_operations(gate, ops), failed), sorted(failed))
 
 
 class StubLLM:
@@ -175,14 +159,27 @@ class StubLLM:
                                                                expected_answer=f'stub {roll}.{n}') for n in range(4)])
         if schema is ConsolidationOutput:
             payload = json.loads(prompt)
-            if any({'expected_answer', 'reason'} & set(f) for f in payload.get('failed_tests', [])):
+            if any({'expected_answer', 'reason'} & set(f) for f in payload.get('failed_checks', [])):
                 raise SystemExit('gold answer leaked into the repair payload')  # not caught by the runner
-            ops = [MemoryOperation(action='WRITE', target_id=None, content=f'stub fact {roll}')]
-            if payload['memory'] and roll < 30:
-                ops.append(MemoryOperation(action='PRUNE', target_id=payload['memory'][0]['id'], content=None))
+            ops = [MemoryOperation(action='WRITE', target_id=None, content=f'stub fact {roll} ' + 'word ' * (roll % 20))]
+            # Prune the oldest items when over budget, so the budget-repair path converges.
+            n_prune = 3 if payload.get('over_budget_by_tokens', 0) > 0 else int(bool(payload['memory']) and roll < 30)
+            ops += [MemoryOperation(action='PRUNE', target_id=x['id'], content=None) for x in payload['memory'][:n_prune]]
             if roll >= 97:  # an invalid op now and then, to exercise error handling
                 ops.append(MemoryOperation(action='REVISE', target_id='no-such-id', content='x'))
             return schema(operations=ops)
+        if schema is SuiteEditOutput:
+            payload = json.loads(prompt)
+            old = [t for t in payload['tests'] if not t['new']]
+            edits = [SuiteEdit(reason='stub change', target_id=old[0]['id'], action='REVISE', expected_answer=f'stub new {roll}')] if old and roll < 20 else []
+            extra = len(payload['tests']) - (payload['max_tests'] or len(payload['tests']))
+            edits += [SuiteEdit(reason='stub minor', target_id=t['id'], action='PRUNE', expected_answer=None)
+                      for t in payload['tests'][1:1 + max(0, extra - 1)]]  # one short, to exercise the fallback
+            if roll >= 95:
+                edits.append(SuiteEdit(reason='stub bad id', target_id='no-such-id', action='PRUNE', expected_answer=None))
+            return schema(edits=edits)
+        if schema is TransitionVerdict:
+            return schema(problems=['stub: a new fact is missing'] if roll < 30 else [])
         if schema is JudgeResult:
             return schema(passed=roll < 85, reason='stub verdict')
         return schema(**{name: 'stub' if name == 'reasoning' else (1.0 if roll < 50 else 0.0) if 'accuracy' in name
@@ -205,18 +202,32 @@ def memory_tokens(llm, memory):
     return len(tokenizer(text).input_ids) if tokenizer is not None else len(text) // 4
 
 
+def trim(memory, budget, count):
+    """Last resort for every arm, and append-only's whole policy: drop the oldest items until memory fits."""
+    if not budget or count(memory) <= budget:
+        return memory, 0
+    memory = deepcopy(memory)
+    dropped = 0
+    while memory.items and count(memory) > budget:
+        memory.items.pop(0)
+        dropped += 1
+    return memory, dropped
+
+
 def make_probes(args, llm, instance, sessions, path):
-    generator, suite, per_session, errors = RegressionGenerator(llm), RegressionSuite(), [], []
+    generator, suite, per_session, extractions, errors = RegressionGenerator(llm), RegressionSuite(), [], [], []
     consolidator, verifier = Consolidator(llm), Verifier(llm)
     for c, session in enumerate(sessions):
+        evidence, ops, facts = session_evidence(session), [], []
         try:
-            evidence = session_evidence(session)
+            # Arm (a)'s extraction of this session, cached so every arm and budget replays the same facts.
+            facts = consolidator.propose(MemoryState(), evidence)
             ops = generator.propose(suite, evidence)
             if ops:
                 # Keep only probes this session's own extracted facts answer: a regression is a test that
                 # once passed, and a probe no memory passes would block every RegMem cycle.
-                facts = extract(consolidator, MemoryState(), evidence)
-                failed = set(verifier.verify(facts, apply_regression_operations(RegressionSuite(), ops)).failed_test_ids)
+                memory = apply_memory_operations(MemoryState(), facts)
+                failed = set(verifier.verify(memory, apply_regression_operations(RegressionSuite(), ops)).failed_test_ids)
                 ops = [op for n, op in enumerate(ops) if str(n) not in failed]
             ops = ops[:args.probes_per_session]
         except Exception as error:  # a malformed generation costs this session's probes, not the run
@@ -224,58 +235,68 @@ def make_probes(args, llm, instance, sessions, path):
             errors.append({'cycle': c, 'error': f'{type(error).__name__}: {error}'})
         suite = apply_regression_operations(suite, ops)
         per_session.append([op.model_dump() for op in ops])
-        print(f'[probes inst{args.instance}] session {c + 1}/{len(sessions)}: {len(ops)} probes', flush=True)
+        extractions.append([op.model_dump() for op in facts])
+        print(f'[probes inst{args.instance}] session {c + 1}/{len(sessions)}: {len(ops)} probes, '
+              f'{len(facts)} facts', flush=True)
     path.write_text(json.dumps({'args': vars(args), 'instance_id': instance.get('ID'), 'errors': errors,
-                                'sessions': per_session}, ensure_ascii=False, indent=1))
+                                'sessions': per_session, 'extractions': extractions}, ensure_ascii=False, indent=1))
     print(f'wrote {path} ({len(suite.tests)} probes, {len(errors)} errored sessions)')
 
 
-def run_arm(args, arm, policy, llm, instance, sessions, probes, out):
-    name = f'regmem-{policy}' if arm == 'regmem' else arm
+def run_arm(args, arm, budget, llm, instance, sessions, probes, out):
+    name = f'{arm}_b{budget}' if budget else arm  # uncapped runs keep the midterm names
     trace_dir = out / 'traces' / f'inst{args.instance}_{name}'
     ops_by_cycle = [[RegressionSuiteOperation(**op) for op in ops] for ops in probes['sessions'][:len(sessions)]]
+    cached = probes.get('extractions')  # probes files from the midterm have none: extract live instead
     consolidator, verifier = Consolidator(llm), Verifier(llm)
-    engine = ConsolidationEngine(consolidator, CachedProbes({session_evidence(s): ops for s, ops in zip(sessions, ops_by_cycle)}),
-                                 verifier, max_repairs=args.max_repairs)
+
+    def count(memory):
+        return memory_tokens(llm, memory)
+
+    def append_session(memory, c, evidence):
+        if cached is None:
+            return extract(consolidator, memory, evidence)
+        return apply_memory_operations(memory, [MemoryOperation(**op) for op in cached[c]])
+
+    tests = CachedProbes({session_evidence(s): ops for s, ops in zip(sessions, ops_by_cycle)} if arm == 'regmem' else {})
+    engine = ConsolidationEngine(consolidator, tests, verifier, max_repairs=args.max_repairs,
+                                 curator=SuiteCurator(llm) if arm == 'regmem' else None,
+                                 transition_checker=TransitionChecker(llm) if arm == 'trustmem' else None,
+                                 token_budget=budget or None, count_tokens=count,
+                                 test_budget=budget // args.tokens_per_test if budget and arm == 'regmem' else None)
     memory, gate, shared, issued_static = MemoryState(), RegressionSuite(), RegressionSuite(), []
     path = out / 'arms' / f'inst{args.instance}_{name}.jsonl'
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('w', encoding='utf-8') as log:
-        log.write(json.dumps({'header': True, 'arm': name, 'args': vars(args), 'instance_id': instance.get('ID'),
-                              'n_sessions': len(sessions)}) + '\n')
+        log.write(json.dumps({'header': True, 'arm': arm, 'budget': budget, 'test_budget': engine.test_budget,
+                              'args': vars(args), 'instance_id': instance.get('ID'), 'n_sessions': len(sessions)}) + '\n')
         for c, session in enumerate(sessions):
             evidence, ops, start = session_evidence(session), ops_by_cycle[c], time.time()
             shared = apply_regression_operations(shared, ops)
             row = {'cycle': c, 'session_id': session.get('Session_ID'), 'date': session.get('Date')}
             try:
                 if arm == 'extract':
-                    memory, row['status'] = extract(consolidator, memory, evidence), 'appended'
-                elif arm == 'summarize':
-                    memory, row['status'] = apply_memory_operations(memory, consolidator.propose(memory, evidence)), 'applied'
+                    memory, row['status'] = append_session(memory, c, evidence), 'appended'
                 else:
                     result = engine.consolidate(memory, gate, evidence, save_run=True, output_dir=trace_dir)
                     row.update(attempts=result.attempts, trace=result.run_path,
-                               failed_test_ids=result.verification.failed_test_ids)
+                               failed_test_ids=result.verification.failed_test_ids, **result.blocking)
+                    gate = result.suite
                     if result.accepted:
-                        memory, gate, row['status'] = result.memory, result.suite, 'accepted'
-                    elif policy == 'retire':
-                        memory, gate, row['retired'] = retire_fallback(memory, gate, ops, result)
-                        row['status'] = 'retired'
-                    else:
-                        memory, gate, row['dropped'] = append_fallback(consolidator, verifier, memory, gate, evidence, ops)
-                        row['status'] = 'appended'
+                        memory, row['status'] = result.memory, 'accepted'
+                    elif arm == 'summarize':  # nothing checks content, so only the budget failed: trim below
+                        memory, row['status'] = apply_memory_operations(memory, result.operations), 'over_budget'
+                    else:  # roll back: keep the previous memory
+                        row['status'] = 'rejected'
             except Exception as error:  # malformed or invalid LLM output must not end the run
                 row.update(status='error', error=f'{type(error).__name__}: {error}')
-                try:  # keep the session's facts: fall back to arm (a) for this cycle
-                    if arm == 'regmem':
-                        memory, gate, row['dropped'] = append_fallback(consolidator, verifier, memory, gate, evidence, ops)
-                    elif arm == 'summarize':
-                        memory = extract(consolidator, memory, evidence)
-                except Exception as fallback_error:
-                    row['fallback_error'] = f'{type(fallback_error).__name__}: {fallback_error}'
-                    if arm == 'regmem':  # keep gate ids aligned with the shared suite
-                        expanded = apply_regression_operations(gate, ops)
-                        gate = without(expanded, {t.id for t in expanded.tests[len(gate.tests):]})
+                if arm == 'summarize':  # keep the session's facts as arm (a) would; checked arms roll back
+                    try:
+                        memory = append_session(memory, c, evidence)
+                    except Exception as fallback_error:
+                        row['fallback_error'] = f'{type(fallback_error).__name__}: {fallback_error}'
+            gate.next_id = shared.next_id  # keep gate test ids equal to shared-suite ids, even after errors
+            memory, row['trimmed_items'] = trim(memory, budget, count)
             checkpoint = (c + 1) % args.checkpoint_every == 0 or c == len(sessions) - 1
             questions = session.get('Session_Questions') or []
             issued_static += [q for q in questions if q.get('conflict_type') == 'static_conflict']
@@ -304,8 +325,12 @@ def run_arm(args, arm, policy, llm, instance, sessions, probes, out):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--arm', required=True, nargs='+', choices=['probes', 'extract', 'summarize', 'regmem'],
+    parser.add_argument('--arm', required=True, nargs='+', choices=['probes', 'extract', 'summarize', 'regmem', 'trustmem'],
                         help='one or more, run in one process (startup costs minutes on the cluster)')
+    parser.add_argument('--budget', type=int, nargs='+', default=[0],
+                        help='memory token budgets; each arm runs once per budget (0 = no cap)')
+    parser.add_argument('--tokens-per-test', type=int, default=50,
+                        help='under a budget, RegMem keeps at most budget / this many tests')
     parser.add_argument('--instance', type=int, required=True, help='line index in the MemConflict JSONL')
     parser.add_argument('--data', default='data/memconflict/Step4_4.jsonl')
     parser.add_argument('--model', default='Qwen/Qwen3-8B', help="HF model id, or 'stub' for a local dry run")
@@ -313,8 +338,6 @@ def main():
     parser.add_argument('--max-sessions', type=int, help='only the first N sessions (smoke/pilot)')
     parser.add_argument('--probes-per-session', type=int, default=3)
     parser.add_argument('--max-repairs', type=int, default=2)
-    parser.add_argument('--on-reject', nargs='+', choices=['append', 'retire'], default=['append'],
-                        help='regmem runs once per policy listed')
     parser.add_argument('--checkpoint-every', type=int, default=10)
     parser.add_argument('--batch-size', type=int, default=8)
     parser.add_argument('--max-new-tokens', type=int, default=2048)
@@ -342,9 +365,9 @@ def main():
             raise SystemExit(f'{probes_path} covers {len(probes["sessions"])} sessions; rerun --arm probes')
         if probes['args']['model'] != args.model:
             print(f"warning: probes were generated with {probes['args']['model']}, these arms run {args.model}")
-        for arm in arms:
-            for policy in (args.on_reject if arm == 'regmem' else [None]):
-                run_arm(args, arm, policy, llm, instance, sessions, probes, out)
+        for budget in args.budget:
+            for arm in arms:
+                run_arm(args, arm, budget, llm, instance, sessions, probes, out)
 
 
 if __name__ == '__main__':

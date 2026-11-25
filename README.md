@@ -2,12 +2,20 @@
 
 Regression-guided memory consolidation that preserves decision-relevant information.
 
-The regression suite is cumulative and append-only. Each evidence batch generates
-new probes, then an LLM proposes WRITE / REVISE / PRUNE memory operations. A solver
-answers every old and new probe using only candidate memory. An LLM judge scores
-semantic correctness, including constraints and exceptions. Failed candidates get
-up to `max_repairs` repair patches and are checked against the entire frozen suite
-again. Acceptance requires every test to pass.
+The regression suite is cumulative. Each evidence batch generates new probes, then
+an LLM proposes WRITE / REVISE / PRUNE memory operations. A solver answers every old
+and new probe using only candidate memory. An LLM judge scores semantic correctness,
+including constraints and exceptions. Failed candidates get up to `max_repairs`
+repair patches and are checked against the same frozen suite again. Acceptance
+requires every test the current memory passes to still pass; new tests join the
+suite only if the accepted memory passes them.
+
+Optional engine arguments: `token_budget` (with `count_tokens`) makes a candidate
+over the budget fail the check, so repair has to compress. `curator=SuiteCurator(llm)`
+with `test_budget` revises tests whose changeable fact the evidence updates and prunes
+the suite to `test_budget` before the proposal, so it can never drop a test to let a
+candidate pass. `transition_checker=TransitionChecker(llm)` adds a TrustMem-style
+review of each update (coverage, preservation, faithfulness).
 
 ```python
 from regmem import ConsolidationEngine, Consolidator, RegressionGenerator, Verifier
